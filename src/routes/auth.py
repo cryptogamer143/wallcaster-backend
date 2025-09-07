@@ -1,9 +1,18 @@
-from flask import Blueprint, request, jsonify, session
-from datetime import datetime
+from flask import Blueprint, request, jsonify
+from datetime import datetime, timedelta
+from flask_jwt_extended import (
+    JWTManager, create_access_token, jwt_required, get_jwt_identity
+)
 from src.models.user import db, User
 
 auth_bp = Blueprint('auth', __name__)
 
+# Initialize JWT in your app (in app.py):
+# app.config["JWT_SECRET_KEY"] = "super-secret-key"  # change in production
+# jwt = JWTManager(app)
+
+
+# ---------------- LOGIN ---------------- #
 @auth_bp.route('/api/auth/login', methods=['POST'])
 def login():
     try:
@@ -24,13 +33,15 @@ def login():
             user.last_login = datetime.utcnow()
             db.session.commit()
             
-            # Store user in session
-            session['user_id'] = user.id
-            session['username'] = user.username
-            session['role'] = user.role
+            # Create JWT token (valid for 1 day)
+            access_token = create_access_token(
+                identity={'id': user.id, 'role': user.role},
+                expires_delta=timedelta(days=1)
+            )
             
             return jsonify({
                 'message': 'Login successful',
+                'token': access_token,
                 'user': user.to_dict()
             }), 200
         else:
@@ -39,14 +50,8 @@ def login():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@auth_bp.route('/api/auth/logout', methods=['POST'])
-def logout():
-    try:
-        session.clear()
-        return jsonify({'message': 'Logout successful'}), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
 
+# ---------------- REGISTER ---------------- #
 @auth_bp.route('/api/auth/register', methods=['POST'])
 def register():
     try:
@@ -67,12 +72,15 @@ def register():
         if User.query.filter_by(email=email).first():
             return jsonify({'error': 'Email already exists'}), 409
         
-        # Create new user
+        # Assign first registered user as admin
+        role = "admin" if User.query.count() == 0 else "user"
+        
         user = User(
             username=username,
             email=email,
             first_name=first_name,
-            last_name=last_name
+            last_name=last_name,
+            role=role
         )
         user.set_password(password)
         
@@ -88,14 +96,14 @@ def register():
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
+
+# ---------------- GET CURRENT USER ---------------- #
 @auth_bp.route('/api/auth/me', methods=['GET'])
+@jwt_required()
 def get_current_user():
     try:
-        user_id = session.get('user_id')
-        if not user_id:
-            return jsonify({'error': 'Not authenticated'}), 401
-        
-        user = User.query.get(user_id)
+        identity = get_jwt_identity()  # {'id': user_id, 'role': user_role}
+        user = User.query.get(identity['id'])
         if not user:
             return jsonify({'error': 'User not found'}), 404
         
@@ -104,12 +112,16 @@ def get_current_user():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+# ---------------- CHANGE PASSWORD ---------------- #
 @auth_bp.route('/api/auth/change-password', methods=['POST'])
+@jwt_required()
 def change_password():
     try:
-        user_id = session.get('user_id')
-        if not user_id:
-            return jsonify({'error': 'Not authenticated'}), 401
+        identity = get_jwt_identity()
+        user = User.query.get(identity['id'])
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
         
         data = request.get_json()
         current_password = data.get('current_password')
@@ -117,10 +129,6 @@ def change_password():
         
         if not current_password or not new_password:
             return jsonify({'error': 'Current and new passwords are required'}), 400
-        
-        user = User.query.get(user_id)
-        if not user:
-            return jsonify({'error': 'User not found'}), 404
         
         if not user.check_password(current_password):
             return jsonify({'error': 'Current password is incorrect'}), 400
@@ -133,4 +141,3 @@ def change_password():
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
-
